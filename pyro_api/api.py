@@ -16,7 +16,10 @@ from ocr.models import DocumentQueue, QueueDocument
 from ocr.literals import DOCUMENTQUEUE_STATE_STOPPED, DOCUMENTQUEUE_STATE_ACTIVE
 
 from converter.exceptions import UnknownFileFormat
-from documents.models import Document, RecentDocument
+from documents.models import Document, RecentDocument, DocumentType
+from document_indexing.models import Index
+from metadata.models import DocumentTypeDefaults, MetadataType, DocumentMetadata
+
 from sources.models import SourceTransformation
 
 ################################################################################
@@ -324,3 +327,128 @@ class DocumentAPI(object):
                     return "%3.1f%s" % (size, x)
                 size /= 1024.0
         return size
+
+    @transaction.commit_on_success
+    def upload_document_with_metadata(self, document, uuid, metadata=None, document_type=None):
+        """helper for upload with some metadata for indexing
+        {
+        @document_type = "Nemovitost"
+
+        @metadata = {
+            "nemovitost": "Nemovitost u PC5",
+            "pohledavka": ["Pohledavka PC7","Pohledavka PC8"],
+            "smlouva": ["US:Nemovitost"],
+            "osoba": ["TEST,TEST"],
+            "nabidka": "Nabidka ind:hoven:koken",
+            }
+        }
+        """
+
+        status = {
+            "success": False,
+            "uuid": "",
+        }
+
+
+        # create temporary file
+        # Transfer file over Pyro is maybe not best idea. Problems can be on large files..
+        # If problems, change this method to some better, for example: rsync, scp.
+        # fd, tmp_path = tempfile.mkstemp()
+        # os.close(fd)
+        size = None
+        with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+
+            tmp_file.write(document)
+
+            # create document in DB
+            document = Document.objects.create()
+            document.uuid = uuid
+            Document.objects.filter(pk=document.pk).update(uuid=uuid)
+
+            # add document for all users
+            for user in User.objects.iterator():
+                RecentDocument.objects.add_document_for_user(user, document)
+
+            # create document version (it create thumbnails, ...)
+            try:
+                f = File(tmp_file, name=uuid)
+                # new_version = self._create_mayan_document(document, f)
+                new_version = document.new_version(file=f)
+                f.close()
+
+            except Exception, e:
+                self.logger.error("%s: %s" % (type(e), str(e)))
+                # Don't leave the database in a broken state
+                # document.delete()
+                transaction.rollback()
+                return status
+
+        pages_count = document.pages.count()
+
+        if os.path.exists(tmp_file.name):
+            size = self.get_file_size(tmp_file.name)
+
+        ret = {
+            "uuid": document.uuid,
+            "document": document.pk,
+            "version": new_version.pk,
+            "pages": pages_count,
+            "size": size,
+        }
+        self.logger.info("Document created: %s" % repr(ret))
+
+        # transform new document
+        transformations, errors = SourceTransformation.transformations.get_for_object_as_list(document)
+        new_version.apply_default_transformations(transformations)
+
+        
+        """find and save document type => for index reuired
+        """
+        if document_type:
+            try:
+                _document_type = DocumentType.objects.get( name = document_type )
+                document.document_type = _document_type
+                document.save()
+            except Exception, e:
+                pass
+
+        """iterates over metadata and saves them
+        """
+        if metadata:
+            metadata_types = MetadataType.objects.all()
+            for key, value in metadata.iteritems():
+                metadata_type = None
+                try:
+                    metadata_type = MetadataType.objects.get( name = key )
+                except Exception, e:
+                    pass
+                if not metadata_type is None:
+                    try:
+                        if not value is None:
+                            if isinstance(value, basestring):
+                                value = [value,]
+                            if isinstance(value, list):
+                                if len(value) > 0:
+                                    for val in value:
+                                        document_metadata = DocumentMetadata()
+                                        document_metadata.document = document
+                                        document_metadata.metadata_type = metadata_type
+                                        document_metadata.value = val
+                                        document_metadata.save()
+                    except Exception, ex:
+                        self.logger.error("Failed to create document metadata: %s" % repr(ex))
+                else:
+                    self.logger.error("MetadataType not found: %s" % repr(e))
+
+        # remove temporary file
+        try:
+            os.remove(tmp_file.name)
+        except OSError:
+            pass
+
+        status.update(ret)
+        status.update({
+            "success": True,
+        })
+
+        return status
