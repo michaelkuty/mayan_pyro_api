@@ -83,3 +83,29 @@ for f in ["tecna.xlsx", "Vypocet_RPSN.xlsx", "Seznam-prijemcu_28_3_2012.xlsx"]:
 
     print pluto_client.api.retrive_plaintext(uuid)
     # >> return document text reprezentation
+
+#######################################
+# upload document with metadata example
+#######################################
+
+def base_upload_file(soubor, name=None, metadata=None, document_type=None):
+    """wrapper for mayan upload
+    handle soubor:File or basestring
+    returns status {success:False, uuid: atd}
+    """
+    
+    document_type = "Nemovitost"
+
+    metadata = {
+        "nemovitost": "Nemovitost u PC5",
+        "pohledavka": ["Pohledavka PC7","Pohledavka PC8"],
+        "smlouva": ["US:Nemovitost"],
+        "osoba": ["TEST,TEST"],
+        "nabidka": "Nabidka ind:test",
+        }
+
+    status = pluto_client.api.upload_document_with_metadata(data,
+                                                            _name,
+                                                            metadata,
+                                                            document_type
+                                                            )
